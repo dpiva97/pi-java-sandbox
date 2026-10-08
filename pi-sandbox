@@ -3,13 +3,14 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'Usage: pi-sandbox [--docker] [--rebuild] [-- PI_ARGS...]' \
+    'Usage: pi-sandbox [--docker] [--rebuild] [--shell] [-- ARGS...]' \
     '' \
     'Run pi with JDK 25 in the current project directory (WSL).' \
     '  --docker   Share the Docker socket for Testcontainers (trusted projects only).' \
     '  --rebuild  Rebuild the image and update the shared skills repository.' \
+    '  --shell    Open Bash in the container instead of pi.' \
     '  --help     Show this help.' \
-    '  --         Forward the remaining arguments to pi.'
+    '  --         Forward the remaining arguments to pi (or Bash with --shell).'
 }
 
 fail() {
@@ -19,13 +20,15 @@ fail() {
 
 with_docker=false
 rebuild=false
+shell=false
 while (($#)); do
   case "$1" in
     --docker) with_docker=true ;;
     --rebuild) rebuild=true ;;
+    --shell) shell=true ;;
     --help|-h) usage; exit 0 ;;
     --) shift; break ;;
-    *) fail "Unknown option: $1. Use --help or -- before pi arguments." ;;
+    *) fail "Unknown option: $1. Use --help or -- before pi/Bash arguments." ;;
   esac
   shift
 done
@@ -86,6 +89,10 @@ if "$rebuild"; then
   docker build --pull --no-cache --tag "$image" "$repo_dir"
 elif ! docker image inspect "$image" >/dev/null 2>&1; then
   docker build --tag "$image" "$repo_dir"
+fi
+
+if "$shell"; then
+  run_args+=(--entrypoint /bin/bash)
 fi
 
 exec docker run "${run_args[@]}" "$image" "$@"

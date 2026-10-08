@@ -74,6 +74,7 @@ test('default: new disposable container, shared volumes, project cwd, no Docker 
   assert.ok(run.includes('type=volume,source=pi-agent-home,target=/home/node/.pi/agent'));
   assert.ok(run.includes('type=volume,source=pi-maven-cache,target=/home/node/.m2'));
   assert.ok(!run.includes('--group-add'));
+  assert.ok(!run.includes('--entrypoint'));
   assert.ok(!run.some(arg => arg.includes('docker.sock') || arg.includes('TESTCONTAINERS')));
   assert.deepEqual(f.calls('build'), []);
 });
@@ -117,6 +118,51 @@ test('--docker adds socket group, Desktop host override and warning; flags combi
   assert.match(result.stderr, /WARNING/);
 });
 
+test('--shell opens Bash with the same project, volumes and skills, without Docker access', async t => {
+  const f = await setup(t);
+  const result = f.launch(['--shell']);
+  assert.equal(result.status, 0, result.stderr);
+  const run = f.calls('run')[0];
+  assert.equal(run[run.indexOf('--entrypoint') + 1], '/bin/bash');
+  assert.equal(run.at(-1), 'pi-java-sandbox');
+  for (const flag of ['--rm', '-it', '--init']) assert.ok(run.includes(flag));
+  assert.ok(run.includes(`type=bind,source=${f.project},target=${f.project}`));
+  assert.equal(run[run.indexOf('--workdir') + 1], f.project);
+  assert.ok(run.includes('type=volume,source=pi-agent-home,target=/home/node/.pi/agent'));
+  assert.ok(run.includes('type=volume,source=pi-maven-cache,target=/home/node/.m2'));
+  assert.ok(run.includes(`type=bind,source=${f.skills},target=/home/node/.agents/skills/intesys,readonly`));
+  assert.ok(!run.some(arg => arg.includes('docker.sock') || arg.includes('TESTCONTAINERS')));
+});
+
+test('--shell combines with --docker and --rebuild', async t => {
+  const f = await setup(t);
+  const result = f.launch(['--shell', '--docker', '--rebuild']);
+  assert.equal(result.status, 0, result.stderr);
+  const run = f.calls('run')[0];
+  assert.equal(run[run.indexOf('--entrypoint') + 1], '/bin/bash');
+  assert.ok(run.includes(`type=bind,source=${f.socket},target=/var/run/docker.sock`));
+  assert.ok(run.includes('--group-add'));
+  assert.ok(run.includes('TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal'));
+  assert.ok(f.calls('build')[0].includes('--no-cache'));
+  assert.deepEqual(f.gitCalls().at(-1), ['-C', f.skills, 'pull', '--ff-only']);
+});
+
+test('--shell forwards Bash arguments unchanged after -- and preserves exit status', async t => {
+  const f = await setup(t);
+  f.env.RUN_EXIT = '42';
+  const result = f.launch(['--shell', '--', '-c', 'exit 42']);
+  assert.equal(result.status, 42);
+  assert.deepEqual(f.calls('run')[0].slice(-5), ['--entrypoint', '/bin/bash', 'pi-java-sandbox', '-c', 'exit 42']);
+});
+
+test('--shell after -- is forwarded to pi, not interpreted by the launcher', async t => {
+  const f = await setup(t);
+  assert.equal(f.launch(['--', '--shell']).status, 0);
+  const run = f.calls('run')[0];
+  assert.ok(!run.includes('--entrypoint'));
+  assert.deepEqual(run.slice(-2), ['pi-java-sandbox', '--shell']);
+});
+
 test('--docker rejects a missing socket before building or running', async t => {
   const f = await setup(t);
   f.env.PI_SANDBOX_DOCKER_SOCKET = join(f.root, 'missing.sock');
@@ -138,6 +184,7 @@ test('help and unknown options do not call Docker', async t => {
   const result = f.launch(['--help']);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--docker/);
+  assert.match(result.stdout, /--shell/);
   assert.notEqual(f.launch(['--unknown']).status, 0);
   assert.deepEqual(f.calls(), []);
 });

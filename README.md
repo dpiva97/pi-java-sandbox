@@ -43,6 +43,7 @@ cd ~/projects/my-app
 pi-sandbox                    # pi + JDK 25, no Docker socket
 pi-sandbox --docker           # also allow Testcontainers to use Docker
 pi-sandbox --rebuild          # refresh the image, then run
+pi-sandbox --shell            # open Bash instead of pi
 pi-sandbox --docker --rebuild  # both options
 pi-sandbox --help
 ```
@@ -53,10 +54,21 @@ refresh the base images and pi installation, including after Dockerfile changes.
 It does not delete the persistent volumes. It also updates the shared skills
 checkout with `git pull --ff-only`. Rebuilding requires network access.
 
-Pass pi arguments after `--`:
+Use `--shell` to open an interactive Bash shell in a new container, rather than
+starting pi. It uses the same project directory, user, shared skills and persistent
+volumes, so pi configuration changes made there are retained across runs. Run
+`pi` or other commands from the shell, then `exit` to remove the container.
+The option can be combined with `--docker` and `--rebuild`:
+
+```bash
+pi-sandbox --shell --docker
+```
+
+Pass pi arguments after `--` (or Bash arguments when using `--shell`):
 
 ```bash
 pi-sandbox --docker -- --continue
+pi-sandbox --shell -- -c 'java -version'
 ```
 
 The project is mounted at **the same absolute path inside and outside** the
