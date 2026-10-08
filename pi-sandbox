@@ -3,12 +3,13 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'Usage: pi-sandbox [--docker] [--rebuild] [--shell] [-- ARGS...]' \
+    'Usage: pi-sandbox [--docker] [--rebuild] [--shell] [--add-dir DIR]... [-- ARGS...]' \
     '' \
     'Run pi with JDK 25 in the current project directory (WSL).' \
     '  --docker   Share the Docker socket for Testcontainers (trusted projects only).' \
     '  --rebuild  Rebuild the image and update the shared skills repository.' \
     '  --shell    Open Bash in the container instead of pi.' \
+    '  --add-dir DIR  Mount an extra directory read/write at the same absolute path (repeatable).' \
     '  --help     Show this help.' \
     '  --         Forward the remaining arguments to pi (or Bash with --shell).'
 }
@@ -21,11 +22,21 @@ fail() {
 with_docker=false
 rebuild=false
 shell=false
+extra_dirs=()
 while (($#)); do
   case "$1" in
     --docker) with_docker=true ;;
     --rebuild) rebuild=true ;;
     --shell) shell=true ;;
+    --add-dir)
+      (($# >= 2)) && [[ -n "$2" && "$2" != --* ]] || fail '--add-dir requires a directory path.'
+      extra_dirs+=("$2")
+      shift
+      ;;
+    --add-dir=*)
+      [[ -n "${1#--add-dir=}" ]] || fail '--add-dir requires a directory path.'
+      extra_dirs+=("${1#--add-dir=}")
+      ;;
     --help|-h) usage; exit 0 ;;
     --) shift; break ;;
     *) fail "Unknown option: $1. Use --help or -- before pi/Bash arguments." ;;
@@ -48,6 +59,27 @@ run_args=(
   --mount type=volume,source=pi-agent-home,target=/home/node/.pi/agent
   --mount type=volume,source=pi-maven-cache,target=/home/node/.m2
 )
+
+# Canonical paths preserve host/container path equality, including symlink inputs.
+# Avoid duplicate Docker mount targets (also when the project is added explicitly).
+mounted_dirs=("$project_dir")
+for dir in "${extra_dirs[@]}"; do
+  [[ "$dir" != *,* ]] || fail 'Additional directory paths containing commas are not supported.'
+  [[ -d "$dir" ]] || fail "Additional directory does not exist or is not a directory: $dir"
+  dir=$(readlink -f -- "$dir") || fail "Cannot resolve additional directory: $dir"
+  [[ "$dir" != *,* ]] || fail 'Resolved additional directory paths containing commas are not supported.'
+  duplicate=false
+  for mounted_dir in "${mounted_dirs[@]}"; do
+    if [[ "$dir" = "$mounted_dir" ]]; then
+      duplicate=true
+      break
+    fi
+  done
+  if ! "$duplicate"; then
+    run_args+=(--mount "type=bind,source=$dir,target=$dir")
+    mounted_dirs+=("$dir")
+  fi
+done
 
 if "$with_docker"; then
   socket=${PI_SANDBOX_DOCKER_SOCKET:-/var/run/docker.sock}

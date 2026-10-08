@@ -163,6 +163,83 @@ test('--shell after -- is forwarded to pi, not interpreted by the launcher', asy
   assert.deepEqual(run.slice(-2), ['pi-java-sandbox', '--shell']);
 });
 
+test('--add-dir is repeatable and resolves relative paths with spaces', async t => {
+  const f = await setup(t);
+  const first = join(f.root, 'shared library');
+  const second = join(f.root, 'other app');
+  mkdirSync(first);
+  mkdirSync(second);
+  const result = f.launch(['--add-dir', '../shared library', `--add-dir=${second}`]);
+  assert.equal(result.status, 0, result.stderr);
+  const run = f.calls('run')[0];
+  for (const dir of [f.project, first, second]) {
+    assert.ok(run.includes(`type=bind,source=${dir},target=${dir}`));
+  }
+  assert.equal(run[run.indexOf('--workdir') + 1], f.project);
+});
+
+test('--add-dir resolves symlinks and mounts duplicate directories only once', async t => {
+  const f = await setup(t);
+  const dir = join(f.root, 'library');
+  const link = join(f.root, 'library link');
+  mkdirSync(dir);
+  symlinkSync(dir, link);
+  const result = f.launch(['--add-dir', dir, '--add-dir', link, '--add-dir', '.']);
+  assert.equal(result.status, 0, result.stderr);
+  const run = f.calls('run')[0];
+  for (const path of [f.project, dir]) {
+    assert.equal(run.filter(arg => arg === `type=bind,source=${path},target=${path}`).length, 1);
+  }
+  assert.ok(!run.some(arg => arg.includes(link)));
+});
+
+test('--add-dir combines with shell, Docker, rebuild and argument forwarding', async t => {
+  const f = await setup(t);
+  const dir = join(f.root, 'library');
+  mkdirSync(dir);
+  const result = f.launch(['--add-dir', dir, '--shell', '--docker', '--rebuild', '--', '-c', 'pwd']);
+  assert.equal(result.status, 0, result.stderr);
+  const run = f.calls('run')[0];
+  assert.ok(run.includes(`type=bind,source=${dir},target=${dir}`));
+  assert.ok(run.includes(`type=bind,source=${f.socket},target=/var/run/docker.sock`));
+  assert.deepEqual(run.slice(-5), ['--entrypoint', '/bin/bash', 'pi-java-sandbox', '-c', 'pwd']);
+  assert.ok(f.calls('build')[0].includes('--no-cache'));
+});
+
+test('--add-dir rejects missing or empty values before Docker or Git operations', async t => {
+  const f = await setup(t);
+  for (const args of [['--add-dir'], ['--add-dir', ''], ['--add-dir='], ['--add-dir', '--shell'], ['--add-dir', '--']]) {
+    const result = f.launch(args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--add-dir requires a directory path/);
+  }
+  assert.deepEqual(f.calls(), []);
+  assert.deepEqual(f.gitCalls(), []);
+});
+
+test('--add-dir rejects nonexistent paths, files and commas before Docker or Git operations', async t => {
+  const f = await setup(t);
+  const file = join(f.root, 'file');
+  writeFileSync(file, 'not a directory');
+  const commaDir = join(f.root, 'library,readonly');
+  mkdirSync(commaDir);
+  const link = join(f.root, 'comma link');
+  symlinkSync(commaDir, link);
+  for (const path of [join(f.root, 'missing'), file, commaDir, link]) {
+    const result = f.launch(['--add-dir', path]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /directory|commas/);
+  }
+  assert.deepEqual(f.calls(), []);
+  assert.deepEqual(f.gitCalls(), []);
+});
+
+test('--add-dir after -- is forwarded to pi without mounting the argument', async t => {
+  const f = await setup(t);
+  assert.equal(f.launch(['--', '--add-dir', '/nonexistent']).status, 0);
+  assert.deepEqual(f.calls('run')[0].slice(-3), ['pi-java-sandbox', '--add-dir', '/nonexistent']);
+});
+
 test('--docker rejects a missing socket before building or running', async t => {
   const f = await setup(t);
   f.env.PI_SANDBOX_DOCKER_SOCKET = join(f.root, 'missing.sock');
@@ -185,6 +262,7 @@ test('help and unknown options do not call Docker', async t => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--docker/);
   assert.match(result.stdout, /--shell/);
+  assert.match(result.stdout, /--add-dir/);
   assert.notEqual(f.launch(['--unknown']).status, 0);
   assert.deepEqual(f.calls(), []);
 });

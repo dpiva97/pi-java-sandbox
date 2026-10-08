@@ -64,6 +64,20 @@ The option can be combined with `--docker` and `--rebuild`:
 pi-sandbox --shell --docker
 ```
 
+Mount additional directories with `--add-dir DIR`, repeating it as needed:
+
+```bash
+pi-sandbox --add-dir ../shared-lib --add-dir "$HOME/projects/other app"
+pi-sandbox --shell --docker --add-dir ../shared-lib
+```
+
+Each directory is mounted **read/write at the same absolute path** in the
+container, in addition to the current project. Relative paths are resolved from
+the current directory; symlinks are resolved to their real paths. Directories
+must already exist and paths must not contain commas. Duplicate directories
+(including the current project) are mounted only once. `--add-dir=DIR` is also
+supported. Only add directories whose contents you trust Pi to access and modify.
+
 Pass pi arguments after `--` (or Bash arguments when using `--shell`):
 
 ```bash
@@ -156,7 +170,8 @@ non-root user does not restrict those Docker API powers. Only enable this for
 trusted projects and when you accept that level of access.
 
 Without `--docker`, pi still has read/write access to the mounted project,
-credentials and shared Maven cache, and the container can access the network.
+any `--add-dir` directories, credentials and shared Maven cache, and the container
+can access the network.
 This is a disposable development environment, **not a security sandbox for
 untrusted code**. Do not share these volumes with untrusted projects.
 
