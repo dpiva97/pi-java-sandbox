@@ -1,0 +1,8 @@
+npm:pi-web-access
+npm:@narumitw/pi-plan-mode
+npm:pi-subagents
+npm:pi-compact-ui
+npm:pi-btw
+npm:@bacnh85/pi-init
+npm:@liuovo/pi-tools-ui
+https://gitlab.intesys.it/intesys/backend/artificial-intelligence/skills.git

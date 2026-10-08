@@ -9,7 +9,7 @@ Docker access for Testcontainers is **opt-in** with `--docker`.
 
 - WSL with Docker Desktop running Linux containers and WSL integration enabled.
 - The `docker` command must work in your WSL shell.
-- Git in WSL and access to the private skills repository on GitLab (see below).
+- Git on the WSL host and access to the private GitLab repository, with host Git authentication configured (see below).
 - A working `mvnw` script in projects that run Maven tests. Maven and the Docker
   CLI are not installed inside the image; Testcontainers uses the Docker API.
 
@@ -51,11 +51,11 @@ pi-sandbox --help
 The first run builds `pi-java-sandbox` automatically if the image is missing.
 Subsequent runs reuse it. `--rebuild` uses `docker build --pull --no-cache` to
 refresh the base images and pi installation, including after Dockerfile changes.
-It does not delete the persistent volumes. It also updates the shared skills
-checkout with `git pull --ff-only`. Rebuilding requires network access.
+It does not delete the persistent volumes. It also updates host Git package checkouts with `git pull --ff-only` (or fetches pinned refs). Package installation runs at Pi startup, not during the image build.
+Rebuilding and package installation require network access.
 
 Use `--shell` to open an interactive Bash shell in a new container, rather than
-starting pi. It uses the same project directory, user, shared skills and persistent
+starting pi. It uses the same project directory, user and persistent
 volumes, so pi configuration changes made there are retained across runs. Run
 `pi` or other commands from the shell, then `exit` to remove the container.
 The option can be combined with `--docker` and `--rebuild`:
@@ -99,35 +99,50 @@ For faster Docker bind mounts, keep the project in WSL (for example,
 In IntelliJ IDEA on Windows, choose **File > Open** and enter
 `\\wsl.localhost\Ubuntu\home\<user>\projects\my-app` (adjust the distribution and user).
 
-## Shared skills
+## Packages and skills
 
-The launcher clones `https://gitlab.intesys.it/davide.piva/skills.git` on the
-**WSL host** into `~/.local/share/pi-sandbox/skills` on first use. It mounts the
-checkout read-only at `/home/node/.agents/skills/intesys`, where Pi recursively
-discovers `SKILL.md` files. This works with existing `pi-agent-home` volumes;
-no Dockerfile change or volume reset is needed.
+Edit **`pi-packages.txt`**: each non-empty line is a package source; lines starting
+with `#` are comments. Use npm sources (optionally pinned with `@version`) or Git
+URLs (`https://`, `ssh://`, `git://`, `git@...`, or Pi’s `git:host/path` syntax).
+Git sources can end in `@tag` or `@commit`.
+The list includes the seven currently configured extension packages and the
+private repository `https://gitlab.intesys.it/intesys/backend/artificial-intelligence/skills`.
+The launcher clones Git sources on the host using its Git credential helper or
+SSH configuration. Checkouts are cached under `~/.local/share/pi-sandbox/packages`
+and mounted read-only at stable paths inside the container. Set
+`PI_SANDBOX_PACKAGES_DIR` to an absolute path without commas to change the cache
+location. Files must be readable by the container’s UID 1000. Subsequent launches
+reuse checkouts; `--rebuild` updates them without resetting local changes.
 
-Configure GitLab authentication in your host Git credential helper before
-launching, or enter your GitLab username and access token when Git prompts.
-Credentials are not copied into the image or container. Do not embed tokens
-in the repository URL. If you already use an SSH key for GitLab, select SSH:
+The short `pi-entrypoint.sh` installs npm sources and registers mounted Git
+checkouts as local Pi packages before starting Pi. Settings and npm packages use
+the persistent `pi-agent-home` volume, including existing volumes. The launcher
+reads the list on each run, so changes to the list do not require rebuilding.
+After this entrypoint/Dockerfile change, run `pi-sandbox --rebuild` once.
+Installation is attempted on every Pi launch; packages removed from the list
+are not automatically removed from Pi settings. To remove a package, delete its line and run
+`pi remove <source>` from `pi-sandbox --shell`; for a mounted Git package,
+use its local path shown by `pi list`. If the same repository was previously
+installed by URL inside the container, remove that old URL entry once to avoid
+loading both versions.
 
-```bash
-export PI_SANDBOX_SKILLS_REPO=git@gitlab.intesys.it:davide.piva/skills.git
-pi-sandbox
-```
+`--shell` bypasses the entrypoint and opens Bash without installing packages.
+Private repositories use Git authentication **on the host**. Configure your
+credential helper or use an SSH URL; Git may prompt on the host on first clone.
+Credentials are not copied into the container. Do not put tokens in the list or
+Dockerfile. A Git repository must expose Pi resources through its `package.json`
+manifest or conventional `skills/`,
+`extensions/`, `prompts/` or `themes/` directories; arbitrary directories at
+the repository root are not automatically treated as skills. Pi does not install
+dependencies for local packages: repositories containing extensions with runtime
+dependencies need those dependencies prepared separately. The mounted checkout
+is intended for skills and other resources that do not need that step.
 
-`PI_SANDBOX_SKILLS_REPO` selects the URL for the initial clone only. Set
-`PI_SANDBOX_SKILLS_DIR` to an absolute path to use an existing checkout or a
-different clone location. The path must not contain commas and its files must
-be readable by the container's UID 1000.
-
-Subsequent runs reuse the checkout without contacting GitLab. To update it,
-run `pi-sandbox --rebuild`, or `git -C ~/.local/share/pi-sandbox/skills pull --ff-only`.
-Clone/update failures stop the launcher with an error; local changes are never
-reset. Avoid concurrent first launches or updates of the shared checkout.
-Skills appear as `/skill:<name>` commands; review their instructions and scripts
-before use, since they can instruct Pi to execute code.
+Existing package filters in Pi settings are retained by `pi install`.
+With a fresh volume, all default package resources are enabled; use `pi config`
+to adjust them. Review packages before installing: extensions execute code with
+Pi's permissions. Avoid concurrent launches while packages are being installed.
+The old host checkout is left untouched but is no longer used.
 
 ## Login and tests
 
@@ -160,9 +175,8 @@ remote Docker contexts. The Testcontainers host override assumes Docker Desktop.
 
 These are the same volume names as the previous manual command, so existing
 logins and caches are retained. Multiple containers can run at once; avoid
-concurrent edits to the same project or shared configuration. `--rebuild` does
-not update or reset configuration, extensions or packages persisted in volumes;
-the host-side shared skills checkout is updated separately.
+concurrent edits to the same project or shared configuration. `--rebuild` does not reset persisted configuration or credentials.
+Packages listed in `pi-packages.txt` are installed at each Pi startup.
 
 **With `--docker`, pi can control the host's Docker daemon**, including other
 containers, volumes and host paths accessible to that daemon. Running as a
@@ -193,7 +207,7 @@ Node.js 22+ and its built-in test runner (no npm dependencies or real Docker
 operations):
 
 ```bash
-bash -n install.sh pi-sandbox
+bash -n install.sh pi-sandbox pi-entrypoint.sh
 node --test tests/*.test.mjs
 ```
 

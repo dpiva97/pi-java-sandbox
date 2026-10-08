@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, symlinkSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, symlinkSync, statSync, rmSync, copyFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -51,7 +51,7 @@ process.exit(exit);
     rmSync(root, { recursive: true, force: true });
   });
   const skills = join(root, 'shared skills');
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DOCKER_LOG: log, GIT_LOG: gitLog, PI_SANDBOX_DOCKER_SOCKET: socket, PI_SANDBOX_SKILLS_DIR: skills };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DOCKER_LOG: log, GIT_LOG: gitLog, PI_SANDBOX_DOCKER_SOCKET: socket, PI_SANDBOX_PACKAGES_DIR: skills };
   for (const key of ['INFO_EXIT', 'IMAGE_MISSING', 'BUILD_EXIT', 'RUN_EXIT', 'GIT_EXIT', 'PI_SANDBOX_SKILLS_REPO']) delete env[key];
   const launch = (args = [], executable = launcher, cwd = project) => spawnSync(executable, args, { cwd, env, encoding: 'utf8' });
   const calls = command => {
@@ -59,7 +59,14 @@ process.exit(exit);
     return command ? all.filter(call => call[0] === command) : all;
   };
   const gitCalls = () => existsSync(gitLog) ? readFileSync(gitLog, 'utf8').trim().split('\n').map(JSON.parse) : [];
-  return { root, project, bin, socket, skills, env, launch, calls, gitCalls };
+  const packageLaunch = (sources, args = []) => {
+    const isolated = join(root, 'launcher repo');
+    mkdirSync(isolated, { recursive: true });
+    copyFileSync(launcher, join(isolated, 'pi-sandbox'));
+    writeFileSync(join(isolated, 'pi-packages.txt'), sources);
+    return launch(args, join(isolated, 'pi-sandbox'));
+  };
+  return { root, project, bin, socket, skills, env, launch, calls, gitCalls, packageLaunch };
 }
 
 // Process-boundary fakes prevent real Git/network and Docker operations.
@@ -130,7 +137,6 @@ test('--shell opens Bash with the same project, volumes and skills, without Dock
   assert.equal(run[run.indexOf('--workdir') + 1], f.project);
   assert.ok(run.includes('type=volume,source=pi-agent-home,target=/home/node/.pi/agent'));
   assert.ok(run.includes('type=volume,source=pi-maven-cache,target=/home/node/.m2'));
-  assert.ok(run.includes(`type=bind,source=${f.skills},target=/home/node/.agents/skills/intesys,readonly`));
   assert.ok(!run.some(arg => arg.includes('docker.sock') || arg.includes('TESTCONTAINERS')));
 });
 
@@ -144,7 +150,6 @@ test('--shell combines with --docker and --rebuild', async t => {
   assert.ok(run.includes('--group-add'));
   assert.ok(run.includes('TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal'));
   assert.ok(f.calls('build')[0].includes('--no-cache'));
-  assert.deepEqual(f.gitCalls().at(-1), ['-C', f.skills, 'pull', '--ff-only']);
 });
 
 test('--shell forwards Bash arguments unchanged after -- and preserves exit status', async t => {
@@ -312,67 +317,72 @@ test('commas in project paths cannot inject mount options', async t => {
   assert.deepEqual(f.calls('run'), []);
 });
 
-test('clones shared skills once on the host and mounts them read-only outside the Pi volume', async t => {
+
+test('Git packages clone once on the host and are installed through stable local paths', async t => {
   const f = await setup(t);
-  assert.equal(f.launch().status, 0);
-  assert.equal(f.launch().status, 0);
-  assert.deepEqual(f.gitCalls(), [['clone', '--', 'https://gitlab.intesys.it/davide.piva/skills.git', f.skills]]);
-  for (const run of f.calls('run')) {
-    assert.ok(run.includes(`type=bind,source=${f.skills},target=/home/node/.agents/skills/intesys,readonly`));
-  }
+  const sources = '# packages\nnpm:example\nhttps://git.example/team/skills.git\nhttps://git.example/team/skills.git';
+  assert.equal(f.packageLaunch(sources).status, 0);
+  assert.equal(f.packageLaunch(sources).status, 0);
+  assert.equal(f.gitCalls().length, 1);
+  assert.deepEqual(f.gitCalls()[0].slice(0, 3), ['clone', '--', 'https://git.example/team/skills.git']);
+  const runs = f.calls('run');
+  const mount = runs[0].find(arg => arg.includes('target=/opt/pi-packages/git/'));
+  assert.ok(mount.endsWith(',readonly'));
+  assert.ok(mount.includes(`source=${f.skills}/`));
+  assert.ok(runs[1].includes(mount));
+  const packages = runs[0].find(arg => arg.startsWith('PI_SANDBOX_PACKAGES='));
+  assert.match(packages, /^PI_SANDBOX_PACKAGES=npm:example\n\/opt\/pi-packages\/git\/[a-f0-9]{64}\n$/);
+  assert.ok(!packages.includes('https://'));
 });
 
-test('--rebuild updates an existing skills checkout with fast-forward only', async t => {
+test('rebuild updates unpinned host checkouts with fast-forward only', async t => {
   const f = await setup(t);
   assert.equal(f.launch().status, 0);
   assert.equal(f.launch(['--rebuild']).status, 0);
-  assert.deepEqual(f.gitCalls()[1], ['-C', f.skills, 'pull', '--ff-only']);
+  const checkout = f.gitCalls()[0].at(-1);
+  assert.deepEqual(f.gitCalls()[1], ['-C', checkout, 'pull', '--ff-only']);
 });
 
-test('supports an SSH skills repository using host authentication', async t => {
+test('SSH and Pi Git syntax use host authentication and support pinned refs', async t => {
   const f = await setup(t);
-  f.env.PI_SANDBOX_SKILLS_REPO = 'git@gitlab.intesys.it:davide.piva/skills.git';
-  assert.equal(f.launch().status, 0);
-  assert.equal(f.gitCalls()[0][2], f.env.PI_SANDBOX_SKILLS_REPO);
+  const sources = 'git@git.example:team/skills.git\ngit:git.example/team/other@v1';
+  assert.equal(f.packageLaunch(sources).status, 0);
+  const calls = f.gitCalls();
+  assert.equal(calls[0][2], 'git@git.example:team/skills.git');
+  assert.equal(calls[1][2], 'https://git.example/team/other');
+  assert.deepEqual(calls[2], ['-C', calls[1].at(-1), 'checkout', '--detach', 'v1']);
+  assert.equal(f.packageLaunch(sources, ['--rebuild']).status, 0);
+  assert.ok(f.gitCalls().some(call => call[2] === 'fetch' && call[3] === 'origin'));
 });
 
-test('clone failure reports authentication setup and never builds or runs', async t => {
+test('host clone or update failures stop before building or running', async t => {
   const f = await setup(t);
   f.env.GIT_EXIT = '1';
-  const result = f.launch();
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /authentication/);
-  assert.deepEqual(f.calls('build'), []);
+  const failedClone = f.launch();
+  assert.notEqual(failedClone.status, 0);
+  assert.match(failedClone.stderr, /authentication on the host/);
   assert.deepEqual(f.calls('run'), []);
-});
-
-test('failed skills update never builds or runs a new container', async t => {
-  const f = await setup(t);
+  f.env.GIT_EXIT = '0';
   assert.equal(f.launch().status, 0);
   f.env.GIT_EXIT = '1';
-  const result = f.launch(['--rebuild']);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Skills update failed/);
+  assert.notEqual(f.launch(['--rebuild']).status, 0);
   assert.deepEqual(f.calls('build'), []);
   assert.equal(f.calls('run').length, 1);
 });
 
-test('rejects invalid skills paths without cloning or running', async t => {
+test('npm-only lists do not invoke Git', async t => {
   const f = await setup(t);
-  for (const path of ['relative/skills', join(f.root, 'skills,readonly')]) {
-    f.env.PI_SANDBOX_SKILLS_DIR = path;
-    assert.notEqual(f.launch().status, 0);
-  }
+  assert.equal(f.packageLaunch('npm:example').status, 0);
   assert.deepEqual(f.gitCalls(), []);
-  assert.deepEqual(f.calls('run'), []);
+  assert.ok(f.calls('run')[0].includes('PI_SANDBOX_PACKAGES=npm:example\n'));
 });
 
-test('does not overwrite an existing non-checkout skills directory', async t => {
+test('invalid package cache paths stop before clone or container launch', async t => {
   const f = await setup(t);
-  mkdirSync(f.skills);
-  const result = f.launch();
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /not a Git checkout/);
+  for (const path of ['relative/cache', join(f.root, 'cache,readonly')]) {
+    f.env.PI_SANDBOX_PACKAGES_DIR = path;
+    assert.notEqual(f.launch().status, 0);
+  }
   assert.deepEqual(f.gitCalls(), []);
   assert.deepEqual(f.calls('run'), []);
 });

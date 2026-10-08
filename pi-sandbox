@@ -7,7 +7,7 @@ usage() {
     '' \
     'Run pi with JDK 25 in the current project directory (WSL).' \
     '  --docker   Share the Docker socket for Testcontainers (trusted projects only).' \
-    '  --rebuild  Rebuild the image and update the shared skills repository.' \
+    '  --rebuild  Rebuild the image and update host Git package checkouts.' \
     '  --shell    Open Bash in the container instead of pi.' \
     '  --add-dir DIR  Mount an extra directory read/write at the same absolute path (repeatable).' \
     '  --help     Show this help.' \
@@ -97,25 +97,58 @@ fi
 
 docker info >/dev/null 2>&1 || fail 'Docker daemon is unavailable. Start Docker Desktop and enable WSL integration.'
 
-# Clone on the host: use its Git credentials, never bake secrets into the image.
-# Mount outside pi-agent-home so existing volumes cannot hide the skills.
-skills_repo=${PI_SANDBOX_SKILLS_REPO:-https://gitlab.intesys.it/davide.piva/skills.git}
-skills_dir=${PI_SANDBOX_SKILLS_DIR:-${HOME:?HOME must be set}/.local/share/pi-sandbox/skills}
-[[ "$skills_dir" = /* && "$skills_dir" != *,* ]] || fail 'Skills directory must be an absolute path without commas.'
-if [[ ! -e "$skills_dir" ]]; then
-  command -v git >/dev/null 2>&1 || fail 'Git is required on the host to clone the skills repository.'
-  mkdir -p -- "$(dirname -- "$skills_dir")"
-  git clone -- "$skills_repo" "$skills_dir" || fail 'Skills clone failed. Configure GitLab authentication on the host and retry.'
-elif [[ ! -e "$skills_dir/.git" ]]; then
-  fail "Skills directory is not a Git checkout: $skills_dir"
-fi
-if "$rebuild"; then
-  command -v git >/dev/null 2>&1 || fail 'Git is required on the host to update the skills repository.'
-  git -C "$skills_dir" pull --ff-only || fail 'Skills update failed. Check GitLab authentication and local changes.'
-fi
-skills_dir=$(readlink -f -- "$skills_dir")
-[[ "$skills_dir" != *,* ]] || fail 'Resolved skills directory paths containing commas are not supported.'
-run_args+=(--mount "type=bind,source=$skills_dir,target=/home/node/.agents/skills/intesys,readonly")
+# Resolve Git sources on the host, where credential helpers and SSH are available.
+# Stable container paths let Pi retain package settings across launches.
+packages_dir=${PI_SANDBOX_PACKAGES_DIR:-${HOME:?HOME must be set}/.local/share/pi-sandbox/packages}
+[[ "$packages_dir" = /* && "$packages_dir" != *,* ]] || fail 'Packages directory must be an absolute path without commas.'
+packages=''
+while IFS= read -r source <&3 || [[ -n "$source" ]]; do
+  [[ -z "$source" || "$source" = \#* ]] && continue
+  case "$source" in
+    https://*|http://*|ssh://*|git://*|git@*|git:*)
+      command -v git >/dev/null 2>&1 || fail 'Git is required on the host to install Git packages.'
+      git_url=$source
+      if [[ "$git_url" = git:* && "$git_url" != git://* ]]; then
+        git_url=${git_url#git:}
+        [[ "$git_url" = *://* || "$git_url" = git@* ]] || git_url="https://$git_url"
+      fi
+      # Pi refs use @ after the repository path (not the SSH user separator).
+      git_ref=''
+      if [[ "${git_url##*/}" = *@* ]]; then
+        git_ref=${git_url##*@}
+        git_url=${git_url%@*}
+        [[ -n "$git_ref" ]] || fail "Empty Git ref: $source"
+      fi
+      package_id=$(printf '%s' "$source" | sha256sum)
+      package_id=${package_id%% *}
+      checkout="$packages_dir/$package_id"
+      if [[ ! -e "$checkout" ]]; then
+        mkdir -p -- "$packages_dir"
+        git clone -- "$git_url" "$checkout" || fail 'Git package clone failed. Configure Git authentication on the host and retry.'
+      elif [[ ! -e "$checkout/.git" ]]; then
+        fail "Package directory is not a Git checkout: $checkout"
+      elif "$rebuild"; then
+        if [[ -n "$git_ref" ]]; then
+          git -C "$checkout" fetch origin || fail 'Git package fetch failed. Check host authentication and retry.'
+        else
+          git -C "$checkout" pull --ff-only || fail 'Git package update failed. Check host authentication and local changes.'
+        fi
+      fi
+      if [[ -n "$git_ref" ]]; then
+        git -C "$checkout" checkout --detach "$git_ref" || fail "Git package ref checkout failed: $git_ref"
+      fi
+      checkout=$(readlink -f -- "$checkout")
+      [[ "$checkout" != *,* ]] || fail 'Resolved package paths containing commas are not supported.'
+      container_path="/opt/pi-packages/git/$package_id"
+      if [[ "$packages" != *"$container_path"$'\n'* ]]; then
+        run_args+=(--mount "type=bind,source=$checkout,target=$container_path,readonly")
+        packages+="$container_path"$'\n'
+      fi
+      ;;
+    *) packages+="$source"$'\n' ;;
+  esac
+done 3< "$repo_dir/pi-packages.txt"
+run_args+=(--env "PI_SANDBOX_PACKAGES=$packages")
 
 if "$rebuild"; then
   docker build --pull --no-cache --tag "$image" "$repo_dir"

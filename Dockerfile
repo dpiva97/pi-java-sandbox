@@ -15,8 +15,9 @@ RUN apt-get update \
 RUN mkdir -p /workspace /home/node/.m2 /home/node/.pi/agent \
   && chown -R node:node /workspace /home/node
 
+COPY --chmod=755 pi-packages.txt pi-entrypoint.sh /opt/
 ENV HOME=/home/node
 USER node
 
 WORKDIR /workspace
-ENTRYPOINT ["pi"]
+ENTRYPOINT ["/opt/pi-entrypoint.sh"]
