@@ -51,7 +51,9 @@ pi-sandbox --help
 The first run builds `pi-java-sandbox` automatically if the image is missing.
 Subsequent runs reuse it. `--rebuild` uses `docker build --pull --no-cache` to
 refresh the base images and pi installation, including after Dockerfile changes.
-It does not delete the persistent volumes. It also updates host Git package checkouts with `git pull --ff-only` (or fetches pinned refs). Package installation runs at Pi startup, not during the image build.
+It does not delete the persistent volumes. It also updates host Git package checkouts with `git pull --ff-only` (or fetches pinned refs).
+Package installation runs at the first Pi startup with a fresh agent volume and
+when using `--rebuild`, not during the image build or on ordinary subsequent launches.
 Rebuilding and package installation require network access.
 
 Use `--shell` to open an interactive Bash shell in a new container, rather than
@@ -116,11 +118,13 @@ reuse checkouts; `--rebuild` updates them without resetting local changes.
 
 The short `pi-entrypoint.sh` installs npm sources and registers mounted Git
 checkouts as local Pi packages before starting Pi. Settings and npm packages use
-the persistent `pi-agent-home` volume, including existing volumes. The launcher
-reads the list on each run, so changes to the list do not require rebuilding.
+the persistent `pi-agent-home` volume, including existing volumes. A completion
+marker in that volume prevents reinstallation on normal launches. It is written
+only after all installations succeed; failures are retried at the next Pi startup.
+Run `pi-sandbox --rebuild` to apply changes to the list or refresh packages.
 After this entrypoint/Dockerfile change, run `pi-sandbox --rebuild` once.
-Installation is attempted on every Pi launch; packages removed from the list
-are not automatically removed from Pi settings. To remove a package, delete its line and run
+Packages removed from the list are not automatically removed from Pi settings.
+To remove a package, delete its line and run
 `pi remove <source>` from `pi-sandbox --shell`; for a mounted Git package,
 use its local path shown by `pi list`. If the same repository was previously
 installed by URL inside the container, remove that old URL entry once to avoid
@@ -176,7 +180,8 @@ remote Docker contexts. The Testcontainers host override assumes Docker Desktop.
 These are the same volume names as the previous manual command, so existing
 logins and caches are retained. Multiple containers can run at once; avoid
 concurrent edits to the same project or shared configuration. `--rebuild` does not reset persisted configuration or credentials.
-Packages listed in `pi-packages.txt` are installed at each Pi startup.
+Packages listed in `pi-packages.txt` are installed only at the first Pi startup
+with an uninitialized agent volume or with `--rebuild`; normal launches reuse them.
 
 **With `--docker`, pi can control the host's Docker daemon**, including other
 containers, volumes and host paths accessible to that daemon. Running as a

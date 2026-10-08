@@ -7,7 +7,7 @@ usage() {
     '' \
     'Run pi with JDK 25 in the current project directory (WSL).' \
     '  --docker   Share the Docker socket for Testcontainers (trusted projects only).' \
-    '  --rebuild  Rebuild the image and update host Git package checkouts.' \
+    '  --rebuild  Rebuild the image, update host Git checkouts and reinstall Pi packages.' \
     '  --shell    Open Bash in the container instead of pi.' \
     '  --add-dir DIR  Mount an extra directory read/write at the same absolute path (repeatable).' \
     '  --help     Show this help.' \
@@ -122,19 +122,22 @@ while IFS= read -r source <&3 || [[ -n "$source" ]]; do
       package_id=$(printf '%s' "$source" | sha256sum)
       package_id=${package_id%% *}
       checkout="$packages_dir/$package_id"
+      checkout_ref=false
       if [[ ! -e "$checkout" ]]; then
+        checkout_ref=true
         mkdir -p -- "$packages_dir"
         git clone -- "$git_url" "$checkout" || fail 'Git package clone failed. Configure Git authentication on the host and retry.'
       elif [[ ! -e "$checkout/.git" ]]; then
         fail "Package directory is not a Git checkout: $checkout"
       elif "$rebuild"; then
+        checkout_ref=true
         if [[ -n "$git_ref" ]]; then
           git -C "$checkout" fetch origin || fail 'Git package fetch failed. Check host authentication and retry.'
         else
           git -C "$checkout" pull --ff-only || fail 'Git package update failed. Check host authentication and local changes.'
         fi
       fi
-      if [[ -n "$git_ref" ]]; then
+      if "$checkout_ref" && [[ -n "$git_ref" ]]; then
         git -C "$checkout" checkout --detach "$git_ref" || fail "Git package ref checkout failed: $git_ref"
       fi
       checkout=$(readlink -f -- "$checkout")
@@ -148,7 +151,7 @@ while IFS= read -r source <&3 || [[ -n "$source" ]]; do
     *) packages+="$source"$'\n' ;;
   esac
 done 3< "$repo_dir/pi-packages.txt"
-run_args+=(--env "PI_SANDBOX_PACKAGES=$packages")
+run_args+=(--env "PI_SANDBOX_PACKAGES=$packages" --env "PI_SANDBOX_REBUILD=$rebuild")
 
 if "$rebuild"; then
   docker build --pull --no-cache --tag "$image" "$repo_dir"

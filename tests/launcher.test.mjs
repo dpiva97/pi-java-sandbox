@@ -84,6 +84,7 @@ test('default: new disposable container, shared volumes, project cwd, no Docker 
   assert.ok(!run.includes('--entrypoint'));
   assert.ok(!run.some(arg => arg.includes('docker.sock') || arg.includes('TESTCONTAINERS')));
   assert.deepEqual(f.calls('build'), []);
+  assert.ok(run.includes('PI_SANDBOX_REBUILD=false'));
 });
 
 test('each invocation runs a new container without a fixed name', async t => {
@@ -111,6 +112,7 @@ test('--rebuild refreshes an existing image before running', async t => {
   const build = f.calls('build')[0];
   assert.ok(build.includes('--no-cache'));
   assert.ok(build.includes('--pull'));
+  assert.ok(f.calls('run')[0].includes('PI_SANDBOX_REBUILD=true'));
   assert.ok(f.calls().findIndex(call => call[0] === 'build') < f.calls().findIndex(call => call[0] === 'run'));
 });
 
@@ -351,6 +353,8 @@ test('SSH and Pi Git syntax use host authentication and support pinned refs', as
   assert.equal(calls[0][2], 'git@git.example:team/skills.git');
   assert.equal(calls[1][2], 'https://git.example/team/other');
   assert.deepEqual(calls[2], ['-C', calls[1].at(-1), 'checkout', '--detach', 'v1']);
+  assert.equal(f.packageLaunch(sources).status, 0);
+  assert.deepEqual(f.gitCalls(), calls); // No fetch, pull or checkout on ordinary launches.
   assert.equal(f.packageLaunch(sources, ['--rebuild']).status, 0);
   assert.ok(f.gitCalls().some(call => call[2] === 'fetch' && call[3] === 'origin'));
 });
