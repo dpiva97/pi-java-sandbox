@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf '%s\n' \
+    'Usage: pi-sandbox [--docker] [--rebuild] [-- PI_ARGS...]' \
+    '' \
+    'Run pi with JDK 25 in the current project directory (WSL).' \
+    '  --docker   Share the Docker socket for Testcontainers (trusted projects only).' \
+    '  --rebuild  Rebuild the image and update the shared skills repository.' \
+    '  --help     Show this help.' \
+    '  --         Forward the remaining arguments to pi.'
+}
+
+fail() {
+  printf 'pi-sandbox: %s\n' "$*" >&2
+  exit 1
+}
+
+with_docker=false
+rebuild=false
+while (($#)); do
+  case "$1" in
+    --docker) with_docker=true ;;
+    --rebuild) rebuild=true ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; break ;;
+    *) fail "Unknown option: $1. Use --help or -- before pi arguments." ;;
+  esac
+  shift
+done
+
+# Resolve symlinks so ~/.local/bin/pi-sandbox still builds from this repository.
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+repo_dir=$(dirname -- "$script_path")
+project_dir=$(pwd -P)
+image=pi-java-sandbox
+[[ "$project_dir" != *,* ]] || fail 'Project paths containing commas are not supported by Docker --mount.'
+command -v docker >/dev/null 2>&1 || fail 'Docker CLI not found. Enable Docker Desktop WSL integration.'
+
+run_args=(
+  --rm -it --init
+  --mount "type=bind,source=$project_dir,target=$project_dir"
+  --workdir "$project_dir"
+  --mount type=volume,source=pi-agent-home,target=/home/node/.pi/agent
+  --mount type=volume,source=pi-maven-cache,target=/home/node/.m2
+)
+
+if "$with_docker"; then
+  socket=${PI_SANDBOX_DOCKER_SOCKET:-/var/run/docker.sock}
+  [[ -S "$socket" ]] || fail "Docker socket not found at $socket. Enable Docker Desktop WSL integration."
+  socket=$(readlink -f -- "$socket")
+  [[ "$socket" != *,* ]] || fail 'Docker socket paths containing commas are not supported.'
+  socket_gid=$(stat -c %g -- "$socket")
+  printf '%s\n' 'WARNING: --docker gives pi control over the host Docker daemon. Use only with trusted projects.' >&2
+  run_args+=(
+    --mount "type=bind,source=$socket,target=/var/run/docker.sock"
+    --group-add "$socket_gid"
+    --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
+  )
+fi
+
+docker info >/dev/null 2>&1 || fail 'Docker daemon is unavailable. Start Docker Desktop and enable WSL integration.'
+
+# Clone on the host: use its Git credentials, never bake secrets into the image.
+# Mount outside pi-agent-home so existing volumes cannot hide the skills.
+skills_repo=${PI_SANDBOX_SKILLS_REPO:-https://gitlab.intesys.it/davide.piva/skills.git}
+skills_dir=${PI_SANDBOX_SKILLS_DIR:-${HOME:?HOME must be set}/.local/share/pi-sandbox/skills}
+[[ "$skills_dir" = /* && "$skills_dir" != *,* ]] || fail 'Skills directory must be an absolute path without commas.'
+if [[ ! -e "$skills_dir" ]]; then
+  command -v git >/dev/null 2>&1 || fail 'Git is required on the host to clone the skills repository.'
+  mkdir -p -- "$(dirname -- "$skills_dir")"
+  git clone -- "$skills_repo" "$skills_dir" || fail 'Skills clone failed. Configure GitLab authentication on the host and retry.'
+elif [[ ! -e "$skills_dir/.git" ]]; then
+  fail "Skills directory is not a Git checkout: $skills_dir"
+fi
+if "$rebuild"; then
+  command -v git >/dev/null 2>&1 || fail 'Git is required on the host to update the skills repository.'
+  git -C "$skills_dir" pull --ff-only || fail 'Skills update failed. Check GitLab authentication and local changes.'
+fi
+skills_dir=$(readlink -f -- "$skills_dir")
+[[ "$skills_dir" != *,* ]] || fail 'Resolved skills directory paths containing commas are not supported.'
+run_args+=(--mount "type=bind,source=$skills_dir,target=/home/node/.agents/skills/intesys,readonly")
+
+if "$rebuild"; then
+  docker build --pull --no-cache --tag "$image" "$repo_dir"
+elif ! docker image inspect "$image" >/dev/null 2>&1; then
+  docker build --tag "$image" "$repo_dir"
+fi
+
+exec docker run "${run_args[@]}" "$image" "$@"

@@ -1,0 +1,3 @@
+# Keep WSL entrypoints runnable even when Git uses autocrlf on Windows.
+*.sh text eol=lf
+pi-sandbox text eol=lf
